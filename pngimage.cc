@@ -3,6 +3,7 @@
 //
 
 #include <vector>
+#include <sstream>
 #include "pngimage.h"
 
 using namespace std;
@@ -16,20 +17,23 @@ void PNGImage::readFromFile(const string &fileIn)
    unsigned char header[8];
    FILE *fp = fopen(fileIn.c_str(), "rb");
    if (!fp) {
-      cout << "[ImagePNG] error reading file " << fileIn << endl;
-      abort();
+      stringstream ss;
+      ss << "Reading file " << fileIn;
+      throw ss.str();
    }
    fread(header, 1, 8, fp);
    if (png_sig_cmp(header, 0, 8)) {
-      cout << "[ImagePNG] error reading header " << fileIn << endl;
-      abort();
+      fclose(fp);
+      stringstream ss;
+      ss << "Reading header " << fileIn;
+      throw ss.str();
    }
 
    // initialize - warning, limited error checking here
    _pngP = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
    if (!_pngP) {
-      cout << "[ImagePNG] error creating struct" << endl;
-      abort();
+      fclose(fp);
+      throw string("Creating struct");
    }
    _infoP = png_create_info_struct(_pngP);
    setjmp(png_jmpbuf(_pngP));
@@ -41,14 +45,14 @@ void PNGImage::readFromFile(const string &fileIn)
    _color = png_get_color_type(_pngP, _infoP);
    _depth = png_get_bit_depth(_pngP, _infoP);
    png_read_update_info(_pngP, _infoP);
-   cout << "[ImagePNG] read, image has size  [" << _width << "," << _height << "]" << endl;
    if (PNG_COLOR_TYPE_RGBA != _color) {
-      cout << "[ImagePNG] only RGBA supported" << endl;
-      abort();
+      fclose(fp);
+      throw string("Only RGBA supported");
    }
    // read file
    if (setjmp(png_jmpbuf(_pngP))) {
-      cout << "[ImagePNG] error reading image" << endl;
+      fclose(fp);
+      throw string("Reading image");
    }
    const size_t nRowBytes = png_get_rowbytes(_pngP, _infoP);
    _rowP = make_unique<png_bytep[]>(_height);
@@ -64,8 +68,9 @@ void PNGImage::writeToFile(const string &fileOut)
 {
    FILE *fp = fopen(fileOut.c_str(), "wb");
    if (!fp) {
-      cout << "[ImagePNG] error opening file " << fileOut << endl;
-      abort();
+      stringstream ss;
+      ss << "Opening file " << fileOut;
+      throw ss.str();
    }
 
    // initialize, limited error checking
@@ -105,8 +110,12 @@ void PNGImage::smooth(int nbSteps, int range)
 void PNGImage::smoothMPI(int nbSteps, int range, int rank, int nNodes)
 {
    stringstream ss;
-   ss << ">>> rank " << rank << " ";
+   ss << "rank " << rank << " ";
    const string label = ss.str();
+   ss.str("");
+   ss << label << "[LOG] smoothing: started" << endl;
+   cout << ss.str();
+   ss.str("");
 
    /* Broadcast initial data from root */
    MPI_Bcast(&_width, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -194,14 +203,14 @@ void PNGImage::smoothMPI(int nbSteps, int range, int rank, int nNodes)
                     0,
                     MPI_COMM_WORLD) != MPI_SUCCESS) {
       ss.str("");
-      ss << label << " [Error]: Initial scattering failed" << endl;
-      cerr << ss.str();
+      ss << label << "Initial scattering failed";
+      throw ss.str();
    }
 
    for (int iStep = 0; iStep < nbSteps; iStep++) {
       const auto timeStart = Clock::now();
       ss.str("");
-      ss << label << "[ImagePNG] smoothing step " << iStep << " started " << endl;
+      ss << label << "[LOG] step " << iStep << ": started" << endl;
       cout << ss.str();
 
       /* smooth along the x-direction and store the results
@@ -234,8 +243,8 @@ void PNGImage::smoothMPI(int nbSteps, int range, int rank, int nNodes)
 
       /* Scatter the calculated rows as block of memories to the all
        * other nodes and receive the missing */
-      for (int i = 0; i < nNodes; i++) {
-         if (MPI_Iscatterv(&tmpRow[0],
+      for (int i = 0; i < nNodes; i++)
+         MPI_Iscatterv(&tmpRow[0],
                        &tmpRowSendCountsOfNode[i * nNodes],
                        &tmpRowSendDisplOfNode[i * nNodes],
                        MPI_INT,
@@ -244,12 +253,7 @@ void PNGImage::smoothMPI(int nbSteps, int range, int rank, int nNodes)
                        MPI_INT,
                        i,
                        MPI_COMM_WORLD,
-                       &req[i]) != MPI_SUCCESS) {
-            ss.str("");
-            ss << label << " [Error]: Could not scatter row results to node #" << i << endl;
-            cerr << ss.str();
-         }
-      }
+                       &req[i]);
       MPI_Waitall(nNodes, &req[0], &stat[0]);
 
       /* Store the received column data ordered into the working
@@ -302,7 +306,7 @@ void PNGImage::smoothMPI(int nbSteps, int range, int rank, int nNodes)
             sendOffset = colsPerNode[rank] * _nbColor;
          } else if (i == (nNodes - 1))
             sendCount -= colsPerNode[rank] * _nbColor;
-         if (MPI_Igatherv(&tmpCol[sendOffset],
+         MPI_Igatherv(&tmpCol[sendOffset],
                       sendCount,
                       MPI_INT,
                       &tmpRow[0],
@@ -311,11 +315,7 @@ void PNGImage::smoothMPI(int nbSteps, int range, int rank, int nNodes)
                       MPI_INT,
                       i,
                       MPI_COMM_WORLD,
-                      &req[i]) != MPI_SUCCESS) {
-            ss.str("");
-            ss << label << " [Error]: Could not gather column results from node #"  << i << endl;
-            cerr << ss.str();
-         }
+                      &req[i]);
       }
       MPI_Waitall(nNodes, &req[0], &stat[0]);
 
@@ -347,7 +347,7 @@ void PNGImage::smoothMPI(int nbSteps, int range, int rank, int nNodes)
       const auto timeEnd = Clock::now();
       chrono::duration<double> elapsed = timeEnd - timeStart;
       ss.str("");
-      ss << label << "[ImagePNG] smoothing step done in " << elapsed.count() << " seconds." << endl;
+      ss << label << "[LOG] step " << iStep << ": done " << elapsed.count() << " s" << endl;
       cout << ss.str();
    }
 
@@ -361,8 +361,8 @@ void PNGImage::smoothMPI(int nbSteps, int range, int rank, int nNodes)
                    0,
                    MPI_COMM_WORLD) != MPI_SUCCESS) {
       ss.str("");
-      ss << label << " [Error]: Final gathering failed" << endl;
-      cerr << ss.str();
+      ss << label << "Final gathering failed";
+      throw ss.str();
    }
 }
 
@@ -375,11 +375,11 @@ void PNGImage::smoothOMP(int nbSteps, int range)
     * use a continues memory layout, because this will
     * give us an advantage when using MPI */
    const size_t rowLen = _width * _nbColor;
-   auto tmp = std::make_unique<int[]>(_height * rowLen);
+   auto tmp = make_unique<int[]>(_height * rowLen);
 
    for (int iStep = 0; iStep < nbSteps; iStep++) {
       const auto timeStart = Clock::now();
-      std::cout << "[ImagePNG] smoothing step " << iStep << " started " << std::endl;
+      cout << "[LOG] step " << iStep << " started" << endl;
 
       /* smooth along the x-direction and store the results
        * in the temporary array. The algorithm starts, by
@@ -435,8 +435,8 @@ void PNGImage::smoothOMP(int nbSteps, int range)
       }
 
       const auto timeEnd = Clock::now();
-      std::chrono::duration<double> elapsed = timeEnd - timeStart;
-      std::cout << "[ImagePNG] smoothing step done in " << elapsed.count() << " seconds." << std::endl;
+      chrono::duration<double> elapsed = timeEnd - timeStart;
+      cout << "[LOG] step " << iStep << " done " << elapsed.count() << " s" << endl;
    }
 }
 #endif
